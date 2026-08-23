@@ -2353,11 +2353,14 @@ if inspect.isawaitable(result):
 import asyncio
 import contextlib
 import logging
+import os
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 from fastapi import FastAPI
 
 from app.api.routes import create_router, register_error_handlers
+from app.api.schemas import COMPACT_SENTINEL
 from app.config import Config
 from app.domain import ErrorCode, ProcessingError, utcnow, window_cutoff
 from app.embedder.base import Embedder
@@ -2366,6 +2369,8 @@ from app.pipeline.processor import Processor
 from app.store.sqlite_store import SqliteStore, decode_vector
 
 logger = logging.getLogger("service")
+
+_SHUTDOWN_SENTINEL = ""  # 停机哨兵：worker 消费到即退出循环
 
 
 def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
@@ -2397,9 +2402,19 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
     async def worker():
         while True:
             post_id = await queue.get()
-            if post_id == "":  # 停机哨兵
+            if post_id == _SHUTDOWN_SENTINEL:  # 停机哨兵
                 queue.task_done()
                 break
+            if post_id == COMPACT_SENTINEL:
+                # 压缩与 search/add 同一 worker 串行执行（IndexService 非线程安全）
+                try:
+                    removed = await asyncio.to_thread(
+                        index.compact, utcnow(), cfg.window_days)
+                    logger.info("索引压缩完成：剔除 %d 条过期条目", removed)
+                except Exception:
+                    logger.exception("索引压缩失败")
+                queue.task_done()
+                continue
             in_flight.add(post_id)
             try:
                 await processor.process(post_id)
@@ -2428,13 +2443,8 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
             health_state["live"] = {"queue_size": queue.qsize(),
                                     "in_flight": len(in_flight)}
 
-    app = FastAPI(title="post-similarity")
-    register_error_handlers(app)
-    app.include_router(create_router(store, processor, cfg, enqueue, health_state))
-
-    @app.on_event("startup")
-    async def startup():
-        import os
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         os.makedirs(os.path.dirname(cfg.db_path) or ".", exist_ok=True)
         await asyncio.to_thread(embedder.load)
         await store.init()
@@ -2444,28 +2454,34 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
         index.rebuild([(pid, ts, decode_vector(iv), decode_vector(tv))
                        for pid, iv, tv, ts in rows])
         logger.info("启动重建索引完成：%d 条", index.size)
-        far_future = utcnow() + timedelta(days=1)
-        for pid in await store.list_stale_pending(far_future):  # 全部 pending 回放
-            await queue.put(pid)
+        # worker 先启动再回放：回放 put 满队列时由 worker 消费形成背压，避免启动死锁
         tasks["worker"] = asyncio.create_task(worker())
         tasks["sweep"] = asyncio.create_task(sweep())
         tasks["stats"] = asyncio.create_task(stats())
+        far_future = utcnow() + timedelta(days=1)
+        for pid in await store.list_stale_pending(far_future):  # 全部 pending 回放
+            await queue.put(pid)
         health_state["ready"] = True
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        health_state["ready"] = False
-        with contextlib.suppress(asyncio.QueueFull):
-            queue.put_nowait("")  # 哨兵唤醒 worker
         try:
-            await asyncio.wait_for(tasks["worker"], timeout=cfg.graceful_shutdown_seconds)
-        except asyncio.TimeoutError:
-            tasks["worker"].cancel()
-        for name in ("sweep", "stats"):
-            tasks[name].cancel()
-        await store.close()
-        logger.info("优雅停机完成")
+            yield
+        finally:
+            health_state["ready"] = False
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(_SHUTDOWN_SENTINEL)  # 哨兵唤醒 worker（排空存量后退出）
+            try:
+                await asyncio.wait_for(tasks["worker"], timeout=cfg.graceful_shutdown_seconds)
+            except asyncio.TimeoutError:
+                tasks["worker"].cancel()
+            for name in ("sweep", "stats"):
+                tasks[name].cancel()
+            await store.close()
+            logger.info("优雅停机完成")
 
+    app = FastAPI(title="post-similarity", lifespan=lifespan)
+    app.state.queue = queue  # 供运维/测试直接投递（如重复入队回归验证）
+    app.state.index = index  # 供测试直接观测 faiss 条目数（ntotal）
+    register_error_handlers(app)
+    app.include_router(create_router(store, processor, cfg, enqueue, health_state))
     return app
 ```
 
