@@ -128,6 +128,22 @@ async def test_health_ready_200(env):
     assert set(body) >= {"index_count", "failed_count"}
 
 
+async def test_text_exceeds_configured_limit_returns_422(tmp_db):
+    """text 上限走 cfg.text_max_chars（env 可覆盖），不再硬编码 schema（最终审查 Warning-4）。"""
+    cfg = Config(db_path=tmp_db, text_max_chars=10)
+    store = SqliteStore(tmp_db)
+    await store.init()
+    proc = Processor(store=store, index=IndexService(), embedder=FakeEmbedder(), cfg=cfg)
+    app = FastAPI()
+    app.include_router(create_router(store, proc, cfg, lambda p: None, {"ready": True}))
+    register_error_handlers(app)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/posts", json={"post_id": "p1", "text": "超" * 11})
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "validation_error"
+    await store.close()
+
+
 async def test_health_not_ready_503(tmp_db):
     cfg = Config(db_path=tmp_db)
     store = SqliteStore(tmp_db)

@@ -231,7 +231,7 @@ max_sim   = max(image_max, text_max)
 - 图片约束：≤20MB，JPEG/PNG/WebP，下载后校验。
 - 幂等：post_id 已存在 → 200 + 当前状态（不重新计算）。
 - 成功：`202 Accepted` + `{"post_id": "...", "status": "pending"}`。
-- 错误：422 参数校验失败；413 图片超限；503 服务不可用（模型未就绪等）。
+- 错误：422 参数校验失败；503 服务不可用（模型未就绪等）。图片超限在解码后校验（见 7.2），归 failed(image_too_large) 而非 413（实现修订：与“下载后校验”表述自洽，base64/url 通道统一流）。
 
 ### 6.2 GET /posts/{post_id}/similarity
 
@@ -277,7 +277,7 @@ max_sim   = max(image_max, text_max)
 
 不变式：
 1. 状态为 indexed 的帖子，库里必有其向量与结果。
-2. 索引内容 = 库中所有 indexed 帖子的向量集合（含窗口外的惰性残留；30 天窗口由检索时的时间戳过滤强制，见 3.4①）。启动重建即一致，运行中 Worker 单线程追加保持。
+2. 索引内容 = 库中窗口内 indexed 帖子的向量集合（启动重建即取窗内全集；窗口外惰性残留不重建也不参与检索，二者等价，见 3.4①）。启动重建即一致，运行中 Worker 单线程追加保持。
 3. 崩溃唯一损失 = 已出队但未落库向量的任务（仍为 pending，回放捞回），零数据丢失。
 
 ### 7.2 故障分类全景
@@ -286,7 +286,7 @@ max_sim   = max(image_max, text_max)
 |---|---|---|---|
 | 图片下载失败 | httpx 异常 | 指数退避重试 3 次 | failed(image_download_failed) |
 | 图片解码失败 | PIL 解码异常 | 不重试 | failed(image_decode_failed) |
-| 图片超限 | API 层校验 | 拒绝，不入队 | 413 |
+| 图片超限 | 解码后校验 | 不重试，独立 reason code | failed(image_too_large) |
 | 编码异常 | try/except | 不重试 | failed(encode_failed) |
 | PostStore 写入失败 | 异常 | 日志告警，停留 pending，兜底扫描重捞 | 最终一致 |
 | 任务出队后崩溃 | — | 启动回放 | 无损恢复 |
@@ -336,7 +336,7 @@ PostStore 实现（Demo）：标准库 `sqlite3`（WAL）+ `asyncio.to_thread` �
 ### 8.2 各层测试重点
 
 - **单元**：Embedder 输出维度/范数/e5 前缀；IndexService 相似度正确性、窗口过滤、自排除、空索引；Store 幂等、状态机迁移、向量 BLOB 往返；max(图,文) 组合、分数截断。
-- **API 层**（TestClient + FakeEmbedder）：422/413/404 边界、幂等、三态查询。
+- **API 层**（TestClient + FakeEmbedder）：422/404 边界、幂等、三态查询；图片超限归 failed(image_too_large)。
 - **集成**（FakeEmbedder 端到端）：POST→Worker→可查；**崩溃恢复测试**：处理中强杀 → 重启 → pending 回放补齐、索引与库一致（不变式验收）。
 
 ### 8.3 关键场景清单
@@ -347,7 +347,7 @@ PostStore 实现（Demo）：标准库 `sqlite3`（WAL）+ `asyncio.to_thread` �
 | 2 | 相似文本 | sim_text 高，max_sim 取文字侧 |
 | 3 | 旧帖超 30 天窗口 | 过滤后 sim = 0 |
 | 4 | 积压时重复提交同 post_id | 幂等，不重复计算 |
-| 5 | 图片下载 404 | 3 次重试后 failed，reason 正确 |
+| 5 | 图片下载 404 | 确定性失败短路不重试，直接 failed，reason 正确（实现偏离：原“3 次重试”对确定性失败无意义） |
 | 6 | 崩溃恢复 | 见 8.2 集成层 |
 
 ### 8.4 效果评估（Demo 核心交付，独立于代码测试）

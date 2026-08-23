@@ -11,7 +11,7 @@ class SubmitPostRequest(BaseModel):
     post_id: str = Field(min_length=1, max_length=128)
     image_url: str | None = None
     image_base64: str | None = None
-    text: str = Field(min_length=1, max_length=5000)
+    text: str = Field(min_length=1)  # 上限由 cfg.text_max_chars 在路由层校验（支持 env 覆盖）
     created_at: str | None = None  # ISO8601，可选（spec §3.4⑧）
 
     @field_validator("post_id")

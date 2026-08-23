@@ -7,7 +7,8 @@ import httpx
 from PIL import Image, UnidentifiedImageError
 
 from app.config import Config
-from app.domain import ImageDecodeError, ImageDownloadError, PostRecord
+from app.domain import (ImageDecodeError, ImageDownloadError, ImageTooLargeError,
+                        PostRecord)
 
 _ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
 
@@ -42,7 +43,8 @@ async def fetch_image(rec: PostRecord, cfg: Config, sleep=asyncio.sleep) -> byte
 
 def decode_and_validate(image_bytes: bytes, cfg: Config) -> bytes:
     if len(image_bytes) > cfg.image_max_bytes:
-        raise ImageDecodeError(f"图片超限: {len(image_bytes)} > {cfg.image_max_bytes}")
+        # 独立 reason code（最终审查 Warning-5）：超限与解码失败语义分离，便于运维排查
+        raise ImageTooLargeError(f"图片超限: {len(image_bytes)} > {cfg.image_max_bytes}")
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             img.verify()

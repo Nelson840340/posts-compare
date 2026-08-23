@@ -23,6 +23,11 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
 
     @router.post("/posts", status_code=202, response_model=SubmitPostResponse)
     async def submit_post(req: SubmitPostRequest):
+        # 上限走 cfg.text_max_chars（支持 SIM_TEXT_MAX_CHARS 覆盖，最终审查 Warning-4）
+        if len(req.text) > cfg.text_max_chars:
+            return JSONResponse(status_code=422, content={
+                "error": {"code": "validation_error",
+                          "message": f"text 超过 {cfg.text_max_chars} 字符上限"}})
         created_at = utcnow()
         if req.created_at:
             created_at = datetime.fromisoformat(req.created_at)

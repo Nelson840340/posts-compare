@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from app.config import Config
-from app.domain import IndexStatus, PostRecord
+from app.domain import EncodeError, IndexStatus, PostRecord
 from app.embedder.fake import FakeEmbedder
 from app.index.service import IndexService
 from app.pipeline.processor import Processor
@@ -108,13 +108,28 @@ async def test_unexpected_exception_marks_internal_error(env, monkeypatch):
     _, store, index, proc = env
     await _submit(store, "p1", _png(), "t", NOW)
 
-    def _boom(image_bytes):
-        raise RuntimeError("模型爆炸")
-    monkeypatch.setattr(proc.embedder, "embed_image", _boom)
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("存储爆炸")
+    # 注入非编码路径（编码异常归 encode_failed，最终审查 Warning-3）
+    monkeypatch.setattr(proc.store, "persist_vectors", _boom)
     with pytest.raises(RuntimeError):
         await proc.process("p1")
     post = await store.get_post("p1")
     assert post.status == IndexStatus.FAILED and post.note == "internal_error"
+
+
+async def test_encode_failure_marks_encode_failed(env, monkeypatch):
+    """spec §7.2：编码异常 → failed(encode_failed)，不再落入 internal_error。"""
+    _, store, index, proc = env
+    await _submit(store, "p1", _png(), "t", NOW)
+
+    def _boom(image_bytes):
+        raise RuntimeError("模型爆炸")
+    monkeypatch.setattr(proc.embedder, "embed_image", _boom)
+    with pytest.raises(EncodeError):  # 编码异常被包裹为 EncodeError（带 code 归类）
+        await proc.process("p1")
+    post = await store.get_post("p1")
+    assert post.status == IndexStatus.FAILED and post.note == "encode_failed"
 
 
 async def test_prefix_contract_query_search_passage_persist(env):

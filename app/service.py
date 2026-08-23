@@ -89,8 +89,11 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
     async def stats():
         while True:
             await asyncio.sleep(5)
-            health_state["live"] = {"queue_size": queue.qsize(),
-                                    "in_flight": len(in_flight)}
+            health_state["live"] = {
+                "queue_size": queue.qsize(),
+                "in_flight": len(in_flight),
+                # spec §6.3/§7.4 /health 四指标之一：最早 pending 滞留秒数
+                "oldest_pending_seconds": await store.oldest_pending_age()}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -115,11 +118,21 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
             yield
         finally:
             health_state["ready"] = False
-            with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(_SHUTDOWN_SENTINEL)  # 哨兵唤醒 worker（排空存量后退出）
+            # 哨兵必须送达 worker 才能排空退出；队列满时阻塞等待而非丢弃
+            # （否则哨兵丢失必然退化为超时强杀，最终审查 Warning-2）
+            sentinel_in = True
             try:
-                await asyncio.wait_for(tasks["worker"], timeout=cfg.graceful_shutdown_seconds)
+                await asyncio.wait_for(queue.put(_SHUTDOWN_SENTINEL),
+                                       timeout=cfg.graceful_shutdown_seconds)
             except asyncio.TimeoutError:
+                sentinel_in = False  # 塞不进哨兵才走超时强杀
+            if sentinel_in:
+                try:
+                    await asyncio.wait_for(tasks["worker"],
+                                           timeout=cfg.graceful_shutdown_seconds)
+                except asyncio.TimeoutError:
+                    tasks["worker"].cancel()
+            else:
                 tasks["worker"].cancel()
             for name in ("sweep", "stats"):
                 tasks[name].cancel()

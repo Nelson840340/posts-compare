@@ -5,7 +5,8 @@ import logging
 import numpy as np
 
 from app.config import Config
-from app.domain import ErrorCode, IndexStatus, SimilarityResult, utcnow, window_cutoff
+from app.domain import (EncodeError, ErrorCode, IndexStatus, SimilarityResult,
+                        utcnow, window_cutoff)
 from app.embedder.base import Embedder
 from app.index.service import IndexService
 from app.pipeline.downloader import decode_and_validate, fetch_image
@@ -52,15 +53,22 @@ class Processor:
                     raw = await fetch_image(rec, self.cfg)
                     image_bytes = decode_and_validate(raw, self.cfg)
                 with timer.stage("image_embed"):
-                    image_vec = await asyncio.to_thread(self.embedder.embed_image, image_bytes)
+                    try:
+                        image_vec = await asyncio.to_thread(
+                            self.embedder.embed_image, image_bytes)
+                    except Exception as e:
+                        raise EncodeError(f"图片向量化失败: {e}") from e
             else:
                 image_vec = np.zeros(self.embedder.image_dim, dtype=np.float32)
             with timer.stage("text_embed"):
                 # 检索用 query 前缀；落库/注册用 passage 前缀（库存侧契约，spec §5.1）
-                text_vec = await asyncio.to_thread(
-                    lambda: self.embedder.embed_text(rec.text, prefix="query: "))
-                passage_vec = await asyncio.to_thread(
-                    lambda: self.embedder.embed_text(rec.text, prefix="passage: "))
+                try:
+                    text_vec = await asyncio.to_thread(
+                        lambda: self.embedder.embed_text(rec.text, prefix="query: "))
+                    passage_vec = await asyncio.to_thread(
+                        lambda: self.embedder.embed_text(rec.text, prefix="passage: "))
+                except Exception as e:
+                    raise EncodeError(f"文字向量化失败: {e}") from e
 
             with timer.stage("persist"):
                 await self.store.persist_vectors(

@@ -11,6 +11,8 @@ dependencies = [
     "pydantic>=2.8", "pydantic-settings>=2.4", "pillow>=10.4",
     "faiss-cpu>=1.8", "open-clip-torch>=2.26", "sentence-transformers>=3.0",
     "numpy>=1.26",
+    # clip_e5 直接 import，显式声明不依赖传递引入（最终审查 Suggestion-6）
+    "torch>=2.2", "torchvision>=0.17",
 ]
 
 [project.optional-dependencies]

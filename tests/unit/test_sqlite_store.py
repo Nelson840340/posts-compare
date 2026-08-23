@@ -79,6 +79,17 @@ async def test_counts(store):
     assert c["failed_count"] == 1
 
 
+async def test_oldest_pending_age(store):
+    """spec §6.3/§7.4 /health 指标：最早 pending 滞留秒数；无 pending 返回 0。"""
+    assert await store.oldest_pending_age() == 0.0  # 空库
+    await store.upsert_post(_rec("fresh"))
+    await store.upsert_post(_rec("stale"))
+    store._execute("UPDATE posts SET enqueued_at=? WHERE post_id=?",
+                   ("2026-01-01T00:00:00+00:00", "stale"))
+    age = await store.oldest_pending_age()  # 取最早（stale）而非 fresh
+    assert age > 200 * 86400  # stale 滞留数月量级；若误取 fresh 则近 0
+
+
 async def test_close_drains_all_worker_connections(tmp_db):
     s = SqliteStore(tmp_db)
     await s.init()

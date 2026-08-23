@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from app.domain import ErrorCode, IndexStatus, PostRecord, SimilarityResult
+from app.domain import ErrorCode, IndexStatus, PostRecord, SimilarityResult, utcnow
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS posts (
@@ -188,3 +188,12 @@ class SqliteStore:
             self._query, "SELECT status, COUNT(*) FROM posts GROUP BY status")
         d = {s: n for s, n in rows}
         return {"index_count": d.get("indexed", 0), "failed_count": d.get("failed", 0)}
+
+    async def oldest_pending_age(self) -> float:
+        """最早 pending 帖的入队滞留秒数（spec §6.3/§7.4 /health 指标）；无 pending 返回 0。"""
+        rows = await asyncio.to_thread(
+            self._query, "SELECT MIN(enqueued_at) FROM posts WHERE status='pending'")
+        oldest = rows[0][0]
+        if oldest is None:
+            return 0.0
+        return (utcnow() - _parse(oldest)).total_seconds()

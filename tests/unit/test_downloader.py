@@ -6,7 +6,8 @@ import pytest
 from PIL import Image
 
 from app.config import Config
-from app.domain import ImageDecodeError, ImageDownloadError, PostRecord
+from app.domain import (ImageDecodeError, ImageDownloadError, ImageTooLargeError,
+                        PostRecord)
 from app.pipeline.downloader import decode_and_validate, fetch_image
 
 
@@ -78,7 +79,7 @@ def test_decode_validates_format_and_size():
     assert decode_and_validate(ok, _cfg()) == ok
     with pytest.raises(ImageDecodeError):
         decode_and_validate(b"not an image", _cfg())
-    with pytest.raises(ImageDecodeError):  # 超限
+    with pytest.raises(ImageTooLargeError):  # 超限独立 reason code（image_too_large）
         decode_and_validate(_png_bytes(), _cfg(image_max_bytes=10))
 
 

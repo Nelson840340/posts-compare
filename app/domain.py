@@ -13,6 +13,7 @@ class IndexStatus(str, Enum):
 class ErrorCode(str, Enum):
     IMAGE_DOWNLOAD_FAILED = "image_download_failed"
     IMAGE_DECODE_FAILED = "image_decode_failed"
+    IMAGE_TOO_LARGE = "image_too_large"
     ENCODE_FAILED = "encode_failed"
     INTERNAL_ERROR = "internal_error"
 
@@ -27,6 +28,10 @@ class ImageDownloadError(ProcessingError):
 
 class ImageDecodeError(ProcessingError):
     code = ErrorCode.IMAGE_DECODE_FAILED
+
+
+class ImageTooLargeError(ProcessingError):
+    code = ErrorCode.IMAGE_TOO_LARGE
 
 
 class EncodeError(ProcessingError):
