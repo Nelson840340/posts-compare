@@ -58,15 +58,24 @@ class SqliteStore:
     def __init__(self, db_path: str):
         self._db_path = db_path
         self._local = threading.local()
+        self._conns: list[sqlite3.Connection] = []
+        self._lock = threading.Lock()
+        self._gen = 0  # 连接代际：close() 后递增，旧线程局部连接作废
 
     # ---- 线程局部连接 ----
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self._db_path)
+        gen = getattr(self._local, "gen", -1)
+        if conn is None or gen != self._gen:
+            # check_same_thread=False：连接仍只在创建它的线程内执行语句，
+            # 仅 close() 从事件循环线程跨线程关闭（Py3.10+ 安全）
+            conn = sqlite3.connect(self._db_path, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             self._local.conn = conn
+            self._local.gen = self._gen
+            with self._lock:
+                self._conns.append(conn)
         return conn
 
     def _execute(self, sql: str, params=()):
@@ -86,10 +95,14 @@ class SqliteStore:
         await asyncio.to_thread(_do)
 
     async def close(self):
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            self._local.conn = None
+        # 关闭全部 worker 线程创建的连接（登记簿）；Py3.10+ 允许跨线程 close；
+        # 代际递增使各 worker 线程残留的已关闭连接引用自动失效、按需重建
+        with self._lock:
+            conns, self._conns = self._conns, []
+            self._gen += 1
+        for c in conns:
+            c.close()
+        self._local.conn = None
 
     async def upsert_post(self, rec: PostRecord) -> bool:
         def _do():

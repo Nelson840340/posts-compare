@@ -77,3 +77,14 @@ async def test_counts(store):
     await store.mark_failed("b", ErrorCode.IMAGE_DECODE_FAILED)
     c = await store.counts()
     assert c["failed_count"] == 1
+
+
+async def test_close_drains_all_worker_connections(tmp_db):
+    s = SqliteStore(tmp_db)
+    await s.init()
+    await s.upsert_post(_rec())
+    assert len(s._conns) >= 1  # worker 线程已建连并登记
+    await s.close()
+    assert s._conns == []  # close 必须关闭全部登记连接，不只当前线程
+    assert (await s.get_post("p1")).text == "你好世界"  # 关闭后重开仍可用
+    await s.close()
