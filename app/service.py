@@ -128,6 +128,7 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
 
     app = FastAPI(title="post-similarity", lifespan=lifespan)
     app.state.queue = queue  # 供运维/测试直接投递（如重复入队回归验证）
+    app.state.index = index  # 供测试直接观测 faiss 条目数（ntotal）
     register_error_handlers(app)
     app.include_router(create_router(store, processor, cfg, enqueue, health_state))
     return app

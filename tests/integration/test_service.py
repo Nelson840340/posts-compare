@@ -143,8 +143,9 @@ async def test_duplicate_dequeue_is_skipped(tmp_db):
             # 后续帖子仍正常处理：worker 未被重复项卡住，守卫拦截而非报错
             await c.post("/posts", json={"post_id": "p2", "image_base64": _png(), "text": "t2"})
             await _wait_until(_indexed(c, "p2"))
-            health = (await c.get("/health")).json()
-            assert health["index_count"] == 2  # p1 未被重复注册
+            # faiss 条目数才是重复注册的真实观测面（DB index_count 只是行计数）：
+            # 无守卫时 p1 会被二次 add → ntotal=3；守卫拦截后仅 2
+            assert app.state.index.size == 2
 
 
 async def test_graceful_shutdown_drains_queue(tmp_db):
