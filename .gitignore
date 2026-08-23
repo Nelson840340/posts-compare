@@ -8,3 +8,4 @@ data/
 *.db-shm
 .superpowers/
 *.egg-info/
+pytest-of-nelson/

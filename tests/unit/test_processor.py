@@ -123,11 +123,17 @@ async def test_prefix_contract_query_search_passage_persist(env):
     await _submit(store, "p1", _png(), "前缀契约正文", NOW)
     seen = {}
     orig_search = index.search
+    orig_add = index.add
 
     def spy_search(iv, tv, **kwargs):
         seen["query_vec"] = tv
         return orig_search(iv, tv, **kwargs)
+
+    def spy_add(pid, created_at, iv, tv):
+        seen["add_vec"] = tv
+        return orig_add(pid, created_at, iv, tv)
     index.search = spy_search
+    index.add = spy_add
     await proc.process("p1")
 
     emb = FakeEmbedder()
@@ -135,6 +141,7 @@ async def test_prefix_contract_query_search_passage_persist(env):
     expected_passage = emb.embed_text("前缀契约正文", prefix="passage: ")
     assert not np.allclose(expected_query, expected_passage)  # 前缀确实改变向量
     assert np.allclose(seen["query_vec"], expected_query)
+    assert np.allclose(seen["add_vec"], expected_passage)  # 注册也用 passage 向量
     row = store._query("SELECT text_vec FROM posts WHERE post_id=?", ("p1",))
     assert np.allclose(decode_vector(row[0][0]), expected_passage)
 
