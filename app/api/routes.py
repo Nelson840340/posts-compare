@@ -1,4 +1,5 @@
 """API 端点（spec §6）。enqueue 与 health_state 由 service 层注入。"""
+import inspect
 import logging
 from datetime import datetime, timezone
 from typing import Callable
@@ -35,7 +36,10 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
             existing = await store.get_post(req.post_id)
             return JSONResponse(status_code=200, content={
                 "post_id": req.post_id, "status": existing.status.value})
-        enqueue(req.post_id)
+        # enqueue 同步/异步兼容：生产为协程（service 层），测试桩为同步函数
+        result = enqueue(req.post_id)
+        if inspect.isawaitable(result):
+            await result
         return SubmitPostResponse(post_id=req.post_id, status="pending")
 
     @router.get("/posts/{post_id}/similarity")
@@ -71,7 +75,9 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
         payload = payload or {}
         if payload.get("mode") == "compact":
             # IndexService 非线程安全：compact 入队经 Worker 串行执行（与 search/add 互斥）
-            enqueue(COMPACT_SENTINEL)
+            result = enqueue(COMPACT_SENTINEL)
+            if inspect.isawaitable(result):
+                await result
             return {"mode": "compact", "status": "scheduled"}
         pid = payload.get("post_id")
         if pid is not None:
@@ -80,7 +86,9 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
                     "error": {"code": "validation_error", "message": "post_id 必须是字符串"}})
             ok = await store.reset_failed_to_pending(pid)
             if ok:
-                enqueue(pid)
+                result = enqueue(pid)
+                if inspect.isawaitable(result):
+                    await result
             return {"post_id": pid, "reset": ok}
         # 无参数：全量回放由 service 层触发（返回提示）
         return {"hint": "提供 post_id 或 mode=compact"}
