@@ -1,0 +1,12 @@
+pyproject.toml
+app/__init__.py
+app/api/__init__.py
+app/embedder/__init__.py
+app/index/__init__.py
+app/pipeline/__init__.py
+app/store/__init__.py
+post_similarity.egg-info/PKG-INFO
+post_similarity.egg-info/SOURCES.txt
+post_similarity.egg-info/dependency_links.txt
+post_similarity.egg-info/requires.txt
+post_similarity.egg-info/top_level.txt
