@@ -94,3 +94,18 @@ def test_compact_removes_expired(svc):
     svc.add("new", NOW - timedelta(days=1), _vec(512, 2), _vec(384, 2))
     removed = svc.compact(NOW, window_days=30)
     assert removed == 1 and svc.size == 1
+
+
+def test_negative_sims_yield_no_matched(svc):
+    """双路内积均为负时 clamp 到 0，matched 必须 None（审查 Minor-2：文字分支防护）。"""
+    iv, tv = _vec(512, 1), _vec(384, 2)
+    # 构造文字路内积 ≈ -0.707 > 图片路 -1，强制走文字分支
+    orth = _vec(384, 77)
+    orth = orth - tv * float(tv @ orth)
+    stored_tv = -tv + orth / np.linalg.norm(orth)
+    stored_tv = (stored_tv / np.linalg.norm(stored_tv)).astype(np.float32)
+    svc.add("p0", NOW - timedelta(days=1), (-iv).astype(np.float32), stored_tv)
+    hit = svc.search(iv, tv, exclude_id="x", cutoff=NOW - timedelta(days=30),
+                     top_k=16, adaptive_k_steps=(64, 256))
+    assert hit.sim_image == 0.0 and hit.sim_text == 0.0
+    assert hit.matched_post_id is None

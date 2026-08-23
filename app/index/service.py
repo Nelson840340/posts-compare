@@ -3,7 +3,8 @@
 - IndexFlatIP + IndexIDMap2：归一化向量内积 = 余弦相似度
 - 30 天窗口与自排除在检索后按元数据过滤（spec §3.4①）
 - 自适应 K：Top-K 过滤后全空且确有命中时逐级扩 K 重查（spec §5.2 grill-me 决议3）
-- 单线程使用（Worker 串行追加 + 检索在线程池），不加锁
+- 非线程安全：search/add/rebuild/compact 必须由调用方串行化
+  （当前由单 Worker 协程顺序 await to_thread 保证；compact 触发点同样须串行）
 """
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -114,10 +115,10 @@ class IndexService:
                 txt_hit, txt_polluted = self._txt.query(text_vec, k, exclude_id, cutoff)
         sim_image = img_hit[0] if img_hit else 0.0
         sim_text = txt_hit[0] if txt_hit else 0.0
-        # matched_post_id 取 max 信号方；并列时优先图片信号
+        # matched_post_id 取 max 信号方；并列时优先图片信号；零分/负分不带匹配对象
         if sim_image >= sim_text:
             matched = img_hit[1] if img_hit and sim_image > 0 else None
         else:
-            matched = txt_hit[1] if txt_hit else None
+            matched = txt_hit[1] if txt_hit and sim_text > 0 else None
         return SearchHit(sim_image=max(sim_image, 0.0), sim_text=max(sim_text, 0.0),
                          matched_post_id=matched, adaptive_expanded=expanded)
