@@ -36,7 +36,8 @@ async def test_invariants_after_simulated_crash(tmp_db):
     cfg = Config(db_path=tmp_db)
     png = _png()
 
-    # 实例一：索引 p1，随后"崩溃"（lifespan 直接退出，不走优雅停机流程验证重启自愈）
+    # 实例一：索引 p1 后正常结束（p1 已 indexed，无在途任务，库状态与崩溃等价）；
+    # 崩溃的核心现场——"已落库 pending 但队列任务丢失"——由下方原生 INSERT 模拟
     app = build_app(cfg, embedder=FakeEmbedder())
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
@@ -75,6 +76,10 @@ async def test_invariants_after_simulated_crash(tmp_db):
             body = (await c.get("/posts/p2/similarity")).json()
             assert body["matched_post_id"] == "p1"
             assert body["sim_image"] > 0.99  # 不变式3：pending 回放补齐，零丢失
+
+            # 不变式2 等式方向：mark_indexed 先于 faiss_add，需先 join 消除观测窗口
+            await app2.state.queue.join()
+            assert app2.state.index.size == 2  # faiss 条目数 == 库中 indexed 集合
 
             health = (await c.get("/health")).json()
             assert health["index_count"] == 2
