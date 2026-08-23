@@ -118,22 +118,17 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
             yield
         finally:
             health_state["ready"] = False
-            # 哨兵必须送达 worker 才能排空退出；队列满时阻塞等待而非丢弃
-            # （否则哨兵丢失必然退化为超时强杀，最终审查 Warning-2）
-            sentinel_in = True
+            # 哨兵必须送达 worker 才能排空退出；队列满时阻塞等待而非丢弃。
+            # 哨兵投递与排空共享单一 graceful_shutdown_seconds 预算（spec §7.5 上限）
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + cfg.graceful_shutdown_seconds
             try:
                 await asyncio.wait_for(queue.put(_SHUTDOWN_SENTINEL),
-                                       timeout=cfg.graceful_shutdown_seconds)
+                                       timeout=max(0.0, deadline - loop.time()))
+                await asyncio.wait_for(tasks["worker"],
+                                       timeout=max(0.0, deadline - loop.time()))
             except asyncio.TimeoutError:
-                sentinel_in = False  # 塞不进哨兵才走超时强杀
-            if sentinel_in:
-                try:
-                    await asyncio.wait_for(tasks["worker"],
-                                           timeout=cfg.graceful_shutdown_seconds)
-                except asyncio.TimeoutError:
-                    tasks["worker"].cancel()
-            else:
-                tasks["worker"].cancel()
+                tasks["worker"].cancel()  # 塞不进哨兵或排空超预算才强杀
             for name in ("sweep", "stats"):
                 tasks[name].cancel()
             await store.close()

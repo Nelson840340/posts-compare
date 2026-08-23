@@ -380,7 +380,7 @@ pytest + pytest-asyncio + httpx（TestClient）+ Faker + tmp_path 隔离 SQLite�
 | 兜底扫描周期 | 5 分钟 | pending 滞留扫描 |
 | pending 滞留阈值 | 10 分钟 | 触发重入队 |
 | 慢任务告警阈值 | total > 5s | WARNING 日志 |
-| 图片大小上限 | 20MB | API 层校验 |
+| 图片大小上限 | 20MB | 解码后校验（failed image_too_large） |
 | 文本长度上限 | 5000 字符 | API 层校验 |
 | 下载重试 | 3 次，1s/4s/16s 退避 | |
 | 优雅停机等待 | 30s | |
