@@ -9,3 +9,5 @@ data/
 .superpowers/
 *.egg-info/
 pytest-of-nelson/
+.vscode/launch.json
+.vscode/settings.json

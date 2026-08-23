@@ -1,5 +1,5 @@
 [virtualenvs]
-create = false
+in-project = true
 
 [keyring]
 enabled = false

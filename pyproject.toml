@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "faker>=26"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "faker>=26", "debugpy (>=1.8.21,<2.0.0)"]
 
 [tool.poetry]
 packages = [{ include = "app" }]
