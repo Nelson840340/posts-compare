@@ -1489,7 +1489,7 @@ async def test_base64_channel_decodes():
 async def test_url_channel_success(monkeypatch):
     raw = _png_bytes()
 
-    async def fake_get(url, timeout):
+    async def fake_get(self, url, timeout):
         return httpx.Response(200, content=raw, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
@@ -1500,7 +1500,7 @@ async def test_url_channel_success(monkeypatch):
 async def test_url_channel_retries_then_fails(monkeypatch):
     calls = {"n": 0}
 
-    async def fake_get(url, timeout):
+    async def fake_get(self, url, timeout):
         calls["n"] += 1
         raise httpx.ConnectError("boom")
 
@@ -1512,7 +1512,7 @@ async def test_url_channel_retries_then_fails(monkeypatch):
 
 
 async def test_http_404_is_download_error(monkeypatch):
-    async def fake_get(url, timeout):
+    async def fake_get(self, url, timeout):
         return httpx.Response(404, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
