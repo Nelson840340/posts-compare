@@ -37,7 +37,7 @@ async def fetch_image(rec: PostRecord, cfg: Config, sleep=asyncio.sleep) -> byte
             last_err = e
         if attempt < cfg.download_retries - 1:
             await sleep(cfg.download_retry_backoff_seconds[attempt])
-    raise ImageDownloadError(f"下载失败（{cfg.download_retries} 次尝试）: {last_err}")
+    raise ImageDownloadError(f"下载失败: {last_err}")
 
 
 def decode_and_validate(image_bytes: bytes, cfg: Config) -> bytes:
@@ -47,6 +47,10 @@ def decode_and_validate(image_bytes: bytes, cfg: Config) -> bytes:
         with Image.open(io.BytesIO(image_bytes)) as img:
             img.verify()
             fmt = img.format
+        # verify 检不出截断图（如 JPEG 尾部截断）：重开并 load 全量解码像素流，
+        # 将截断/损坏归类为 image_decode_failed 而非下游 encode_failed
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.load()
     except (UnidentifiedImageError, OSError) as e:
         raise ImageDecodeError(f"图片解码失败: {e}") from e
     if fmt not in _ALLOWED_FORMATS:

@@ -80,3 +80,13 @@ def test_decode_validates_format_and_size():
         decode_and_validate(b"not an image", _cfg())
     with pytest.raises(ImageDecodeError):  # 超限
         decode_and_validate(_png_bytes(), _cfg(image_max_bytes=10))
+
+
+def test_truncated_jpeg_is_decode_error():
+    """verify() 检不出的尾部截断，load() 全量解码必须归类 image_decode_failed（审查 Minor-1）。"""
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 600), (9, 9, 9)).save(buf, format="JPEG")
+    raw = buf.getvalue()
+    truncated = raw[: len(raw) // 2]
+    with pytest.raises(ImageDecodeError):
+        decode_and_validate(truncated, _cfg())
