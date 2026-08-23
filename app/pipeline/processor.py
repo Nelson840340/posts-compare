@@ -5,7 +5,7 @@ import logging
 import numpy as np
 
 from app.config import Config
-from app.domain import ErrorCode, SimilarityResult, utcnow, window_cutoff
+from app.domain import ErrorCode, IndexStatus, SimilarityResult, utcnow, window_cutoff
 from app.embedder.base import Embedder
 from app.index.service import IndexService
 from app.pipeline.downloader import decode_and_validate, fetch_image
@@ -29,6 +29,10 @@ class Processor:
         rec = await self.store.get_post(post_id)
         if rec is None:
             logger.warning("post_id=%s 不存在，跳过", post_id)
+            return
+        if rec.status != IndexStatus.PENDING:
+            # 幂等守卫：拦截 sweep/入队竞态下的重复处理（避免重复注册索引条目）
+            logger.info("post_id=%s status=%s，跳过重复处理", post_id, rec.status.value)
             return
         try:
             # ---- 超窗短路（spec §3.4⑧）----

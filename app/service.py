@@ -127,6 +127,7 @@ def build_app(cfg: Config, embedder: Embedder | None = None) -> FastAPI:
             logger.info("优雅停机完成")
 
     app = FastAPI(title="post-similarity", lifespan=lifespan)
+    app.state.queue = queue  # 供运维/测试直接投递（如重复入队回归验证）
     register_error_handlers(app)
     app.include_router(create_router(store, processor, cfg, enqueue, health_state))
     return app

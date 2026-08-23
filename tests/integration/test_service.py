@@ -1,13 +1,14 @@
 import asyncio
 import base64
 import io
+from datetime import timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
 from app.config import Config
-from app.domain import PostRecord
+from app.domain import PostRecord, utcnow
 from app.embedder.fake import FakeEmbedder
 from app.service import build_app
 from app.store.sqlite_store import SqliteStore
@@ -96,16 +97,19 @@ async def test_startup_rebuild_and_replay(tmp_db):
 
 
 async def test_sweep_reenqueues_stale_pending(tmp_db):
+    """sweep 独立验证：运行期直插滞留 pending（绕过启动回放与提交接口）。"""
     cfg = Config(db_path=tmp_db, sweep_interval_seconds=1, pending_stale_seconds=0)
-    store = SqliteStore(tmp_db)
-    await store.init()
-    await store.upsert_post(PostRecord(post_id="stale", text="滞留帖", image_base64=_png()))
-    await store.close()
-
     app = build_app(cfg, embedder=FakeEmbedder())
     async with app.router.lifespan_context(app):
+        # 启动后直插：不在回放集内，也未经提交接口入队——只能由 sweep 兜底
+        store = SqliteStore(tmp_db)
+        await store.init()
+        rec = PostRecord(post_id="stale", text="滞留帖", image_base64=_png(),
+                         enqueued_at=utcnow() - timedelta(hours=1))
+        assert await store.upsert_post(rec)
+        await store.close()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-            await _wait_until(_indexed(c, "stale"), timeout=10.0)  # 回放/sweep 兜底处理
+            await _wait_until(_indexed(c, "stale"), timeout=10.0)  # sweep 兜底处理
 
 
 async def test_compact_sentinel_consumed_by_worker(app_env):
@@ -122,6 +126,25 @@ async def test_compact_sentinel_consumed_by_worker(app_env):
     await _wait_until(_indexed(client, "p2"))
     health = (await client.get("/health")).json()
     assert health["index_count"] == 2  # 窗内无过期条目，compact 剔除 0
+
+
+async def test_duplicate_dequeue_is_skipped(tmp_db):
+    """回归（审查 Important）：同一 pid 被重复消费时，状态守卫拦截二次处理。"""
+    cfg = Config(db_path=tmp_db, sweep_interval_seconds=600)
+    app = build_app(cfg, embedder=FakeEmbedder())
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            await c.post("/posts", json={"post_id": "p1", "image_base64": _png(), "text": "t"})
+            await _wait_until(_indexed(c, "p1"))
+            health = (await c.get("/health")).json()
+            assert health["index_count"] == 1
+            # 直接向队列重复投递已 indexed 的帖（模拟 sweep 竞态重复入队）
+            await app.state.queue.put("p1")
+            # 后续帖子仍正常处理：worker 未被重复项卡住，守卫拦截而非报错
+            await c.post("/posts", json={"post_id": "p2", "image_base64": _png(), "text": "t2"})
+            await _wait_until(_indexed(c, "p2"))
+            health = (await c.get("/health")).json()
+            assert health["index_count"] == 2  # p1 未被重复注册
 
 
 async def test_graceful_shutdown_drains_queue(tmp_db):

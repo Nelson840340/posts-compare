@@ -2008,7 +2008,12 @@ Expected: FAIL（`ModuleNotFoundError: app.api.routes`）
 
 ```python
 """API 数据契约（spec §6）。"""
-from pydantic import BaseModel, Field, model_validator
+from datetime import datetime
+
+from pydantic import BaseModel, Field, field_validator
+
+# 保留哨兵：Worker 识别后执行索引压缩（不可用作 post_id）
+COMPACT_SENTINEL = "__compact__"
 
 
 class SubmitPostRequest(BaseModel):
@@ -2016,13 +2021,24 @@ class SubmitPostRequest(BaseModel):
     image_url: str | None = None
     image_base64: str | None = None
     text: str = Field(min_length=1, max_length=5000)
-    created_at: str | None = None  # ISO8601 UTC，可选（spec §3.4⑧）
+    created_at: str | None = None  # ISO8601，可选（spec §3.4⑧）
 
-    @model_validator(mode="after")
-    def _require_image(self):
-        if not self.image_url and not self.image_base64:
-            raise ValueError("image_url 与 image_base64 至少提供一个")
-        return self
+    @field_validator("post_id")
+    @classmethod
+    def _reserved_sentinel(cls, v: str) -> str:
+        if v == COMPACT_SENTINEL:
+            raise ValueError("post_id 为保留字")
+        return v
+
+    @field_validator("created_at")
+    @classmethod
+    def _iso8601(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                datetime.fromisoformat(v)
+            except ValueError as e:
+                raise ValueError("created_at 必须是 ISO8601 格式") from e
+        return v
 
 
 class SubmitPostResponse(BaseModel):
@@ -2049,17 +2065,21 @@ class ErrorResponse(BaseModel):
 
 ```python
 """API 端点（spec §6）。enqueue 与 health_state 由 service 层注入。"""
+import logging
 from datetime import datetime, timezone
 from typing import Callable
 
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.schemas import SubmitPostRequest, SubmitPostResponse
+from app.api.schemas import COMPACT_SENTINEL, SubmitPostRequest, SubmitPostResponse
 from app.config import Config
 from app.domain import IndexStatus, PostRecord, utcnow
 from app.pipeline.processor import Processor
 from app.store.base import PostStore
+
+logger = logging.getLogger("api")
 
 
 def create_router(store: PostStore, processor: Processor, cfg: Config,
@@ -2068,10 +2088,6 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
 
     @router.post("/posts", status_code=202, response_model=SubmitPostResponse)
     async def submit_post(req: SubmitPostRequest):
-        existing = await store.get_post(req.post_id)
-        if existing is not None:  # 幂等：不重新计算
-            return JSONResponse(status_code=200, content={
-                "post_id": req.post_id, "status": existing.status.value})
         created_at = utcnow()
         if req.created_at:
             created_at = datetime.fromisoformat(req.created_at)
@@ -2080,7 +2096,11 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
         rec = PostRecord(post_id=req.post_id, text=req.text,
                          image_url=req.image_url, image_base64=req.image_base64,
                          created_at=created_at)
-        await store.upsert_post(rec)
+        # ON CONFLICT DO NOTHING 原子判定：并发重复提交仅一个成功，避免 TOCTOU 多次入队
+        if not await store.upsert_post(rec):
+            existing = await store.get_post(req.post_id)
+            return JSONResponse(status_code=200, content={
+                "post_id": req.post_id, "status": existing.status.value})
         enqueue(req.post_id)
         return SubmitPostResponse(post_id=req.post_id, status="pending")
 
@@ -2116,10 +2136,14 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
     async def admin_replay(payload: dict | None = None):
         payload = payload or {}
         if payload.get("mode") == "compact":
-            removed = processor.index.compact(utcnow(), cfg.window_days)
-            return {"mode": "compact", "removed": removed}
+            # IndexService 非线程安全：compact 入队经 Worker 串行执行（与 search/add 互斥）
+            enqueue(COMPACT_SENTINEL)
+            return {"mode": "compact", "status": "scheduled"}
         pid = payload.get("post_id")
-        if pid:
+        if pid is not None:
+            if not isinstance(pid, str):
+                return JSONResponse(status_code=422, content={
+                    "error": {"code": "validation_error", "message": "post_id 必须是字符串"}})
             ok = await store.reset_failed_to_pending(pid)
             if ok:
                 enqueue(pid)
