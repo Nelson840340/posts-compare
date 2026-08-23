@@ -22,10 +22,6 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
 
     @router.post("/posts", status_code=202, response_model=SubmitPostResponse)
     async def submit_post(req: SubmitPostRequest):
-        existing = await store.get_post(req.post_id)
-        if existing is not None:  # 幂等：不重新计算
-            return JSONResponse(status_code=200, content={
-                "post_id": req.post_id, "status": existing.status.value})
         created_at = utcnow()
         if req.created_at:
             created_at = datetime.fromisoformat(req.created_at)
@@ -34,7 +30,11 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
         rec = PostRecord(post_id=req.post_id, text=req.text,
                          image_url=req.image_url, image_base64=req.image_base64,
                          created_at=created_at)
-        await store.upsert_post(rec)
+        # ON CONFLICT DO NOTHING 原子判定：并发重复提交仅一个成功，避免 TOCTOU 多次入队
+        if not await store.upsert_post(rec):
+            existing = await store.get_post(req.post_id)
+            return JSONResponse(status_code=200, content={
+                "post_id": req.post_id, "status": existing.status.value})
         enqueue(req.post_id)
         return SubmitPostResponse(post_id=req.post_id, status="pending")
 
@@ -74,7 +74,10 @@ def create_router(store: PostStore, processor: Processor, cfg: Config,
             enqueue(COMPACT_SENTINEL)
             return {"mode": "compact", "status": "scheduled"}
         pid = payload.get("post_id")
-        if pid:
+        if pid is not None:
+            if not isinstance(pid, str):
+                return JSONResponse(status_code=422, content={
+                    "error": {"code": "validation_error", "message": "post_id 必须是字符串"}})
             ok = await store.reset_failed_to_pending(pid)
             if ok:
                 enqueue(pid)

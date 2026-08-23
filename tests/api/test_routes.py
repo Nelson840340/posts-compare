@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 
@@ -64,6 +65,16 @@ async def test_duplicate_post_id_is_idempotent(env):
     assert enqueued == ["p1"]  # 未二次入队
 
 
+async def test_concurrent_duplicate_submits_enqueue_once(env):
+    """TOCTOU 回归：并发重复提交仅一个 202，只入队一次（upsert 原子判定）。"""
+    client, _, _, enqueued = env
+    body = {"post_id": "p1", "image_base64": _png(), "text": "你好"}
+    rs = await asyncio.gather(*[client.post("/posts", json=body) for _ in range(5)])
+    codes = sorted(r.status_code for r in rs)
+    assert codes == [200, 200, 200, 200, 202]
+    assert enqueued == ["p1"]
+
+
 async def test_validation_errors(env):
     client, _, _, _ = env
     r = await client.post("/posts", json={"post_id": "p"})  # 缺 text
@@ -108,6 +119,15 @@ async def test_failed_state_returns_reason(env):
     assert r.json() == {"status": "failed", "reason": "image_decode_failed"}
 
 
+async def test_health_ready_200(env):
+    client, _, _, _ = env
+    r = await client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok" and body["models_loaded"] is True
+    assert set(body) >= {"index_count", "failed_count"}
+
+
 async def test_health_not_ready_503(tmp_db):
     cfg = Config(db_path=tmp_db)
     store = SqliteStore(tmp_db)
@@ -137,6 +157,10 @@ async def test_admin_replay_resets_failed(env):
     # 未 failed 的帖子不重置
     r = await client.post("/admin/replay", json={"post_id": "ghost"})
     assert r.json() == {"post_id": "ghost", "reset": False}
+    assert "ghost" not in enqueued
+    # 非标量 post_id → 422 统一格式，不得 500
+    r = await client.post("/admin/replay", json={"post_id": ["a"]})
+    assert r.status_code == 422 and "error" in r.json()
 
 
 async def test_admin_replay_compact_enqueues_sentinel(env):
