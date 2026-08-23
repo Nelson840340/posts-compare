@@ -1,0 +1,5 @@
+[virtualenvs]
+create = false
+
+[keyring]
+enabled = false

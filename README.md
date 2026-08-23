@@ -8,16 +8,17 @@
 
 ## 环境准备
 
+使用 Poetry 管理依赖（依赖已锁定在 `poetry.lock`；torch/torchvision 走 PyTorch 官方 CPU 轮子源，见 `pyproject.toml` 中的 `pytorch-cpu` source）：
+
 ```bash
-uv venv --python 3.11
-uv pip install -e ".[dev]"
+poetry install          # 安装全部依赖（含 dev 组），生成 poetry.lock
 ```
 
 模型首次下载需可达 Hugging Face（本环境使用镜像）：
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-pytest -m slow   # 真模型冒烟测试，首次运行自动下载 CLIP ViT-B/32 与 multilingual-e5-small
+poetry run pytest -m slow   # 真模型冒烟测试，首次运行自动下载 CLIP ViT-B/32 与 multilingual-e5-small
 ```
 
 模型下载后缓存在 `~/.cache/huggingface/hub`，后续运行无需联网。
@@ -25,7 +26,7 @@ pytest -m slow   # 真模型冒烟测试，首次运行自动下载 CLIP ViT-B/3
 ## 启动
 
 ```bash
-python -m app.main        # 默认 127.0.0.1:8000
+poetry run python -m app.main        # 默认 127.0.0.1:8000
 ```
 
 所有配置项及默认值见 [app/config.py](app/config.py)，支持 `SIM_` 前缀环境变量覆盖，常用：
@@ -78,9 +79,9 @@ curl -X POST http://127.0.0.1:8000/admin/replay -H 'Content-Type: application/js
 ## 测试与校准
 
 ```bash
-pytest -q                          # 单元/API/集成（默认排除 slow）
-pytest -m slow                     # 真模型冒烟（需 HF_ENDPOINT，首次下载模型）
-HF_ENDPOINT=https://hf-mirror.com python eval/synthetic_calibration.py   # 合成校准
+poetry run pytest -q                          # 单元/API/集成（默认排除 slow）
+poetry run pytest -m slow                     # 真模型冒烟（需 HF_ENDPOINT，首次下载模型）
+HF_ENDPOINT=https://hf-mirror.com poetry run python eval/synthetic_calibration.py   # 合成校准
 ```
 
 校准脚本生成正负例对（裁剪/缩放/调色变体 vs 不同图；改写句 vs 无关句），输出 `eval/calibration_report.json` 与阈值建议。合成校准仅为起点，上生产后必须用真实流量重校（spec §5.3）。

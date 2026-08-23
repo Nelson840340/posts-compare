@@ -1,11 +1,12 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
 
 [project]
 name = "post-similarity"
 version = "0.1.0"
-requires-python = ">=3.11"
+# torch/torchvision 排除 Python 3.14.1，项目范围需相应收窄
+requires-python = ">=3.11,!=3.14.1"
 dependencies = [
     "fastapi>=0.115", "uvicorn[standard]>=0.30", "httpx>=0.27",
     "pydantic>=2.8", "pydantic-settings>=2.4", "pillow>=10.4",
@@ -15,11 +16,28 @@ dependencies = [
     "torch>=2.2", "torchvision>=0.17",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "faker>=26"]
 
-[tool.setuptools.packages.find]
-include = ["app*"]
+[tool.poetry]
+packages = [{ include = "app" }]
+
+# torch/torchvision 走 PyTorch 官方 CPU 轮子源，避免拉到带 CUDA 的大包；
+# 收紧到已验证可用的 2.13/0.28 系列，加速 lock 解析
+[tool.poetry.dependencies]
+torch = { version = "~=2.13.0", source = "pytorch-cpu" }
+torchvision = { version = "~=0.28.0", source = "pytorch-cpu" }
+
+# 主源走清华镜像加速（直连 PyPI 很慢）
+[[tool.poetry.source]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+priority = "primary"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
