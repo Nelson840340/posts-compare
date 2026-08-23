@@ -746,7 +746,7 @@ git add app/store/ tests/unit/test_sqlite_store.py && git commit -m "feat: Sqlit
 - Produces:
   - `Embedder` Protocol：`embed_image(image_bytes: bytes) -> np.ndarray`（shape (512,) float32，L2 范数=1）、`embed_text(text: str, *, prefix: str) -> np.ndarray`（shape (384,) float32，L2 范数=1）、`load() -> None`、`image_dim -> int`、`text_dim -> int`
   - `normalize(v: np.ndarray) -> np.ndarray` 工具函数
-  - `FakeEmbedder`：确定性伪向量——图片按字节 sha256 播种生成（相同字节→相同向量；字节差异越大向量越不相似：对首 1KB 做字节均值特征混合），文字按字符 n-gram 哈希累加生成（语义近似的长文本向量接近，用于集成测试断言相对大小关系）；prefix 参数会被并入哈希（测试前缀传导）
+  - `FakeEmbedder`：确定性伪向量——图片按字节 sha256 播种生成（相同字节→相同向量；字节差异越大向量越不相似：对首 1KB 做字节直方图特征 + 固定 basis 混合），文字按字符 n-gram 哈希累加生成（语义近似的长文本向量接近，用于集成测试断言相对大小关系）；prefix 参数会被并入哈希（测试前缀传导）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -855,7 +855,8 @@ class Embedder(Protocol):
 ```python
 """FakeEmbedder：确定性伪向量，测试主力（spec §8.1）。
 
-图片：sha256 播种主方向 + 首 1KB 字节均值特征，字节微小差异→向量接近。
+图片：sha256 播种主方向 + 首 1KB 字节直方图特征（固定 basis），
+字节微小差异→向量接近，跨输入一致。
 文字：字符 2-gram 哈希累加，共享 n-gram 越多越接近。
 prefix 并入哈希，用于验证前缀传导。
 """
@@ -864,6 +865,9 @@ import hashlib
 import numpy as np
 
 from app.embedder.base import IMAGE_DIM, TEXT_DIM, normalize
+
+# 固定 basis：使直方图特征→向量的映射跨输入一致（不能用内容播种，否则 1 字节变化即失效）
+_BASIS = np.random.default_rng(0x5EED).standard_normal((256, IMAGE_DIM)).astype(np.float32)
 
 
 class FakeEmbedder:
@@ -878,11 +882,12 @@ class FakeEmbedder:
         v = rng.standard_normal(IMAGE_DIM).astype(np.float32)
         head = image_bytes[:1024]
         if head:
-            # 字节统计特征注入低频分量：相近内容获得相近偏移
-            feats = np.array([sum(head) % 997, len(head), head.count(b"X"[0]),
-                              head[0], head[-1]], dtype=np.float32) / 1000.0
-            basis = rng.standard_normal((len(feats), IMAGE_DIM)).astype(np.float32)
-            v = v * 0.3 + feats @ basis
+            # 字节直方图特征注入低频分量：相近内容获得相近偏移
+            feats = np.zeros(256, dtype=np.float32)
+            for byte in head:
+                feats[byte] += 1.0
+            feats /= 1024.0
+            v = v * 0.1 + feats @ _BASIS
         return normalize(v)
 
     def embed_text(self, text: str, *, prefix: str) -> np.ndarray:
