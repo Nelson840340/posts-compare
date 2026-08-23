@@ -52,6 +52,13 @@ def test_prefix_changes_vector(emb):
     assert not np.allclose(p, q)
 
 
+def test_cross_prefix_same_text_high_similarity(emb):
+    """仿 e5 语义契约：同内容跨前缀（query↔passage）仍高相似。"""
+    p = emb.embed_text("完全相同的正文内容", prefix="passage: ")
+    q = emb.embed_text("完全相同的正文内容", prefix="query: ")
+    assert float(p @ q) > 0.9
+
+
 def test_similar_texts_more_similar(emb):
     a = emb.embed_text("今天天气很好我们去公园散步", prefix="passage: ")
     b = emb.embed_text("今天天气很好我们去公园散步呀", prefix="query: ")

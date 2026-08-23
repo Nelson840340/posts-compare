@@ -11,7 +11,7 @@ from app.domain import IndexStatus, PostRecord
 from app.embedder.fake import FakeEmbedder
 from app.index.service import IndexService
 from app.pipeline.processor import Processor
-from app.store.sqlite_store import SqliteStore
+from app.store.sqlite_store import SqliteStore, decode_vector
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
 
@@ -86,13 +86,57 @@ async def test_failure_marks_failed_and_reraises(env):
     assert index.size == 0
 
 
-async def test_order_vector_persisted_before_index_add(env):
-    """顺序铁律：mark_indexed 后向量已在库（重启可重建）。"""
+async def test_order_vector_persisted_before_index_add(env, monkeypatch):
+    """顺序铁律：persist 后 index.add 崩溃 → 向量已在库（重启可重建），状态 failed 不入重建集。"""
     _, store, index, proc = env
     await _submit(store, "p1", _png(), "t", NOW)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("faiss add 崩溃")
+    monkeypatch.setattr(index, "add", _boom)
+    with pytest.raises(RuntimeError):
+        await proc.process("p1")
+    row = store._query("SELECT image_vec, text_vec FROM posts WHERE post_id=?", ("p1",))
+    assert row[0][0] is not None and row[0][1] is not None  # 向量已落库
+    post = await store.get_post("p1")
+    assert post.status == IndexStatus.FAILED  # 不会被误标 indexed
+    assert index.size == 0  # 未注册
+
+
+async def test_unexpected_exception_marks_internal_error(env, monkeypatch):
+    """无 code 属性的意外异常 → mark_failed(INTERNAL_ERROR) 后 re-raise。"""
+    _, store, index, proc = env
+    await _submit(store, "p1", _png(), "t", NOW)
+
+    def _boom(image_bytes):
+        raise RuntimeError("模型爆炸")
+    monkeypatch.setattr(proc.embedder, "embed_image", _boom)
+    with pytest.raises(RuntimeError):
+        await proc.process("p1")
+    post = await store.get_post("p1")
+    assert post.status == IndexStatus.FAILED and post.note == "internal_error"
+
+
+async def test_prefix_contract_query_search_passage_persist(env):
+    """spec §5.1：检索传 query 前缀向量；落库/注册用 passage 前缀向量。"""
+    _, store, index, proc = env
+    await _submit(store, "p1", _png(), "前缀契约正文", NOW)
+    seen = {}
+    orig_search = index.search
+
+    def spy_search(iv, tv, **kwargs):
+        seen["query_vec"] = tv
+        return orig_search(iv, tv, **kwargs)
+    index.search = spy_search
     await proc.process("p1")
-    rows = await store.list_indexed_within(NOW - timedelta(days=30))
-    assert len(rows) == 1 and rows[0][1] is not None and rows[0][2] is not None
+
+    emb = FakeEmbedder()
+    expected_query = emb.embed_text("前缀契约正文", prefix="query: ")
+    expected_passage = emb.embed_text("前缀契约正文", prefix="passage: ")
+    assert not np.allclose(expected_query, expected_passage)  # 前缀确实改变向量
+    assert np.allclose(seen["query_vec"], expected_query)
+    row = store._query("SELECT text_vec FROM posts WHERE post_id=?", ("p1",))
+    assert np.allclose(decode_vector(row[0][0]), expected_passage)
 
 
 async def test_no_image_post_text_only(env):
@@ -106,7 +150,7 @@ async def test_no_image_post_text_only(env):
     await proc.process("p2")
     res = await store.get_result("p2")
     assert res.sim_image == 0.0
-    assert res.sim_text > 0.99 and res.matched_post_id == "p1"
+    assert res.sim_text > 0.95 and res.matched_post_id == "p1"
     assert index.size == 2
     # 重建路径：image_vec NULL 不得把无图帖挡在重建集外
     rows = await store.list_indexed_within(NOW - timedelta(days=30))

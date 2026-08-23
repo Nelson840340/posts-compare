@@ -3,7 +3,8 @@
 图片：sha256 播种主方向 + 首 1KB 字节直方图特征（固定 basis），
 字节微小差异→向量接近，跨输入一致。
 文字：字符 2-gram 哈希累加，共享 n-gram 越多越接近。
-prefix 并入哈希，用于验证前缀传导。
+prefix 独立哈希为固定小扰动方向：同内容跨前缀仍高相似（仿 e5 语义契约），
+且不同前缀向量确实不同（防静默漏前缀）。
 """
 import hashlib
 
@@ -37,11 +38,15 @@ class FakeEmbedder:
 
     def embed_text(self, text: str, *, prefix: str) -> np.ndarray:
         v = np.zeros(TEXT_DIM, dtype=np.float32)
-        salted = prefix + text
-        for i in range(len(salted) - 1):
-            gram = salted[i:i + 2]
+        for i in range(len(text) - 1):
+            gram = text[i:i + 2]
             h = int.from_bytes(hashlib.sha256(gram.encode()).digest()[:4], "big")
             v[h % TEXT_DIM] += 1.0
         if v.sum() == 0:  # 空文本兜底：固定方向
             v[0] = 1.0
-        return normalize(v)
+        v = normalize(v)
+        # prefix 独立哈希方向的小扰动：向量随前缀变化，但内容信号主导（同文跨前缀 >0.9）
+        ph = int.from_bytes(hashlib.sha256(prefix.encode()).digest()[:4], "big")
+        rng = np.random.default_rng(ph)
+        pv = rng.standard_normal(TEXT_DIM).astype(np.float32)
+        return normalize(v + 0.15 * normalize(pv))

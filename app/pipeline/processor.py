@@ -52,19 +52,20 @@ class Processor:
             else:
                 image_vec = np.zeros(self.embedder.image_dim, dtype=np.float32)
             with timer.stage("text_embed"):
+                # 检索用 query 前缀；落库/注册用 passage 前缀（库存侧契约，spec §5.1）
                 text_vec = await asyncio.to_thread(
                     lambda: self.embedder.embed_text(rec.text, prefix="query: "))
+                passage_vec = await asyncio.to_thread(
+                    lambda: self.embedder.embed_text(rec.text, prefix="passage: "))
 
             with timer.stage("persist"):
                 await self.store.persist_vectors(
-                    post_id, encode_vector(image_vec), encode_vector(text_vec))
+                    post_id, encode_vector(image_vec), encode_vector(passage_vec))
 
             with timer.stage("search"):
-                # 库存旧帖向量以 passage 前缀编码；检索在 to_thread 中执行
-                passage_vec = await asyncio.to_thread(
-                    lambda: self.embedder.embed_text(rec.text, prefix="passage: "))
+                # 检索在 to_thread 中执行（IndexService 非线程安全，单 Worker 串行）
                 hit = await asyncio.to_thread(
-                    self.index.search, image_vec, passage_vec,
+                    self.index.search, image_vec, text_vec,
                     exclude_id=post_id, cutoff=cutoff,
                     top_k=self.cfg.top_k,
                     adaptive_k_steps=self.cfg.adaptive_k_steps)

@@ -858,7 +858,8 @@ class Embedder(Protocol):
 图片：sha256 播种主方向 + 首 1KB 字节直方图特征（固定 basis），
 字节微小差异→向量接近，跨输入一致。
 文字：字符 2-gram 哈希累加，共享 n-gram 越多越接近。
-prefix 并入哈希，用于验证前缀传导。
+prefix 独立哈希为固定小扰动方向：同内容跨前缀仍高相似（仿 e5 语义契约），
+且不同前缀向量确实不同（防静默漏前缀）。
 """
 import hashlib
 
@@ -892,14 +893,18 @@ class FakeEmbedder:
 
     def embed_text(self, text: str, *, prefix: str) -> np.ndarray:
         v = np.zeros(TEXT_DIM, dtype=np.float32)
-        salted = prefix + text
-        for i in range(len(salted) - 1):
-            gram = salted[i:i + 2]
+        for i in range(len(text) - 1):
+            gram = text[i:i + 2]
             h = int.from_bytes(hashlib.sha256(gram.encode()).digest()[:4], "big")
             v[h % TEXT_DIM] += 1.0
         if v.sum() == 0:  # 空文本兜底：固定方向
             v[0] = 1.0
-        return normalize(v)
+        v = normalize(v)
+        # prefix 独立哈希方向的小扰动：向量随前缀变化，但内容信号主导（同文跨前缀 >0.9）
+        ph = int.from_bytes(hashlib.sha256(prefix.encode()).digest()[:4], "big")
+        rng = np.random.default_rng(ph)
+        pv = rng.standard_normal(TEXT_DIM).astype(np.float32)
+        return normalize(v + 0.15 * normalize(pv))
 ```
 
 - [ ] **Step 4: 运行确认通过并提交**
@@ -1742,10 +1747,11 @@ Expected: FAIL（`ModuleNotFoundError: app.pipeline.processor`）
 """单帖处理编排（spec §4.1 顺序铁律 + §7.4 耗时打点 + §3.4⑧ 超窗短路）。"""
 import asyncio
 import logging
-from datetime import timedelta
+
+import numpy as np
 
 from app.config import Config
-from app.domain import SimilarityResult, utcnow, window_cutoff
+from app.domain import ErrorCode, SimilarityResult, utcnow, window_cutoff
 from app.embedder.base import Embedder
 from app.index.service import IndexService
 from app.pipeline.downloader import decode_and_validate, fetch_image
@@ -1781,25 +1787,31 @@ class Processor:
                 logger.info("post_id=%s phase=skip reason=created_at_outside_window", post_id)
                 return
 
-            with timer.stage("download"):
-                raw = await fetch_image(rec, self.cfg)
-                image_bytes = decode_and_validate(raw, self.cfg)
-            with timer.stage("image_embed"):
-                image_vec = await asyncio.to_thread(self.embedder.embed_image, image_bytes)
+            # ---- 无图帖：前置字段检查跳过图片通道，零向量落库（sim 恒 0 不误匹配）----
+            has_image = bool(rec.image_url or rec.image_base64)
+            if has_image:
+                with timer.stage("download"):
+                    raw = await fetch_image(rec, self.cfg)
+                    image_bytes = decode_and_validate(raw, self.cfg)
+                with timer.stage("image_embed"):
+                    image_vec = await asyncio.to_thread(self.embedder.embed_image, image_bytes)
+            else:
+                image_vec = np.zeros(self.embedder.image_dim, dtype=np.float32)
             with timer.stage("text_embed"):
+                # 检索用 query 前缀；落库/注册用 passage 前缀（库存侧契约，spec §5.1）
                 text_vec = await asyncio.to_thread(
                     lambda: self.embedder.embed_text(rec.text, prefix="query: "))
+                passage_vec = await asyncio.to_thread(
+                    lambda: self.embedder.embed_text(rec.text, prefix="passage: "))
 
             with timer.stage("persist"):
                 await self.store.persist_vectors(
-                    post_id, encode_vector(image_vec), encode_vector(text_vec))
+                    post_id, encode_vector(image_vec), encode_vector(passage_vec))
 
             with timer.stage("search"):
-                # 库存旧帖向量以 passage 前缀编码；检索在 to_thread 中执行
-                passage_vec = await asyncio.to_thread(
-                    lambda: self.embedder.embed_text(rec.text, prefix="passage: "))
+                # 检索在 to_thread 中执行（IndexService 非线程安全，单 Worker 串行）
                 hit = await asyncio.to_thread(
-                    self.index.search, image_vec, passage_vec,
+                    self.index.search, image_vec, text_vec,
                     exclude_id=post_id, cutoff=cutoff,
                     top_k=self.cfg.top_k,
                     adaptive_k_steps=self.cfg.adaptive_k_steps)
@@ -1823,12 +1835,11 @@ class Processor:
             self._log_complete(post_id, timer)
         except Exception as e:
             code = getattr(e, "code", None)
-            if code is not None:  # ProcessingError 家族
-                await self.store.mark_failed(post_id, code)
-                logger.error("post_id=%s phase=failed reason=%s %s",
-                             post_id, code.value, timer.summary())
-                raise
-            logger.exception("post_id=%s phase=failed reason=internal_error", post_id)
+            if code is None:  # 意外异常兜底：记 INTERNAL_ERROR，避免 pending 被无限重试
+                code = ErrorCode.INTERNAL_ERROR
+            await self.store.mark_failed(post_id, code)
+            logger.error("post_id=%s phase=failed reason=%s %s",
+                         post_id, code.value, timer.summary())
             raise
 
     def _log_complete(self, post_id: str, timer: StageTimer):
