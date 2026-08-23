@@ -104,9 +104,15 @@ def main():
     OUT.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
-    # 阈值建议：正例最小值与负例最大值的中点（各信号独立）
+    # 阈值建议：正例最小值与负例最大值的中点（各信号独立），持久化进 report
     pos_min = min(min(v) for k, v in img_scores.items() if k != "negative")
     neg_max = max(img_scores["negative"])
+    report["threshold_suggestion"] = {
+        "image_split": round((pos_min + neg_max) / 2, 4),
+        "text_split": round((min(txt_pos) + max(txt_neg)) / 2, 4),
+        "caveat": "图片正负分布重叠，分割点仅供参考",
+    }
+    OUT.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"\n[图片] 正例min={pos_min:.3f} 负例max={neg_max:.3f} "
           f"建议分割点={(pos_min + neg_max) / 2:.3f}")
     print(f"[文字] 正例min={min(txt_pos):.3f} 负例max={max(txt_neg):.3f} "
