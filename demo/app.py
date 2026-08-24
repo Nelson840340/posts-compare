@@ -6,11 +6,22 @@
 """
 import logging
 import os
+import sys
 import threading
 
 # macOS 上 faiss 与 torch 各自携带 libomp，双份加载会在首次检索时 SIGABRT；
 # 必须在任何扩展库加载前设置（Linux 无此冲突，setdefault 不覆盖用户显式配置）
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+# 以脚本方式直跑（python demo/app.py，含 IDE 调试器）时，脚本目录 demo/ 位于
+# sys.path 首位，demo/app.py 会遮蔽 app 包（'app' is not a package）；
+# 剔除脚本目录并补入项目根，保证 `from app...` 解析到 app 包。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+sys.path[:] = [p for p in sys.path
+               if os.path.abspath(p or os.getcwd()) != _HERE]
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 import gradio as gr
 
