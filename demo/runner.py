@@ -13,6 +13,8 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 
+import httpx
+import numpy as np
 from PIL import Image
 
 from app.config import Config
@@ -51,6 +53,35 @@ class DemoResult:
     outcome: ProcessOutcome | None
     top_posts: list[DemoPost] = field(default_factory=list)
     submitted_image: Image.Image | None = None
+    top_note: str = ""
+
+
+def fetch_top_image(rec, timeout: float) -> Image.Image | None:
+    """Top-3 渲染用图片获取（A-4）：base64 解码；URL 单次请求、不重试。失败 None。"""
+    if rec.image_base64:
+        try:
+            raw = base64.b64decode(rec.image_base64, validate=True)
+            return Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception:
+            return None
+    if rec.image_url:
+        try:
+            resp = httpx.get(rec.image_url, timeout=timeout, follow_redirects=True)
+            if resp.status_code != 200:
+                return None
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception:
+            return None
+    return None
+
+
+def tier_text(max_sim: float, hard: float, soft: float) -> str:
+    """阈值标档辅助标注（A-6）：阈值由 cfg 动态传入，判定权在下游。"""
+    if max_sim >= hard:
+        return f"≥{hard:g}：强降权区间（参考）"
+    if max_sim >= soft:
+        return f"{soft:g}~{hard:g}：软降权区间（参考）"
+    return f"<{soft:g}：正常"
 
 
 class DemoRunner:
@@ -95,7 +126,7 @@ class DemoRunner:
                     timeout=_RUN_TIMEOUT))
             except TimeoutError:
                 return DemoResult(post_id, "failed", "处理超时，请重试", None)
-            return self._finish(post_id, outcome, image_bytes)
+            return self._finish(post_id, outcome, image_bytes, text)
 
     async def _run(self, post_id: str, image_bytes: bytes | None,
                    image_url: str | None, text: str) -> ProcessOutcome:
@@ -111,7 +142,7 @@ class DemoRunner:
         return await proc.process(post_id, raise_on_error=False)
 
     def _finish(self, post_id: str, outcome: ProcessOutcome,
-                image_bytes: bytes | None) -> DemoResult:
+                image_bytes: bytes | None, text: str) -> DemoResult:
         submitted = None
         if image_bytes:
             try:
@@ -123,6 +154,37 @@ class DemoRunner:
             return DemoResult(post_id, "failed",
                               code.value if code else "internal_error",
                               outcome, top_posts=[], submitted_image=submitted)
-        # Task 4 在此处补齐 Top-3 内容加载；第一版返回空列表
+        top_posts, top_note = self.load_top_posts(outcome, image_bytes, text=text)
         return DemoResult(post_id, "indexed", None, outcome,
-                          top_posts=[], submitted_image=submitted)
+                          top_posts=top_posts, top_note=top_note,
+                          submitted_image=submitted)
+
+    def load_top_posts(self, outcome: ProcessOutcome, image_bytes: bytes | None,
+                       text: str, k: int = 3) -> tuple[list[DemoPost], str]:
+        """Top-K 检索 + 内容加载。返回 (帖子列表, 不足 k 条时的提示)。"""
+        image_vec = (self.embedder.embed_image(image_bytes) if image_bytes
+                     else np.zeros(self.embedder.image_dim, dtype=np.float32))
+        text_vec = self.embedder.embed_text(text, prefix="query: ")
+        cutoff = window_cutoff(utcnow(), self.cfg.window_days)
+        hits = self.index.top_hits(image_vec, text_vec,
+                                   exclude_id=outcome.result.post_id,
+                                   cutoff=cutoff, k=k)
+
+        async def _load():
+            out = []
+            for h in hits:
+                rec = await self.store.get_post(h.post_id)
+                if rec is None:
+                    out.append(DemoPost(h.post_id, "（帖子记录缺失）", None))
+                    continue
+                img = await asyncio.to_thread(fetch_top_image, rec, 3.0)
+                out.append(DemoPost(h.post_id, rec.text, img,
+                                    sim_image=h.sim_image, sim_text=h.sim_text))
+            return out
+
+        try:
+            posts = asyncio.run(asyncio.wait_for(_load(), timeout=_RUN_TIMEOUT))
+        except TimeoutError:
+            posts = []
+        note = "" if len(posts) >= k else f"仅检索到 {len(posts)} 条相似帖"
+        return posts, note

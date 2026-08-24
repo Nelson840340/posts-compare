@@ -755,9 +755,9 @@ git commit -m "feat: DemoRunner 核心——就绪装配、输入校验、锁串
 
 ```python
 def test_tier_text_boundaries():
-    assert tier_text(0.95, 0.90, 0.75) == "≥0.90：强降权区间（参考）"
-    assert tier_text(0.90, 0.90, 0.75) == "≥0.90：强降权区间（参考）"  # 边界归强档
-    assert tier_text(0.80, 0.90, 0.75) == "0.75~0.90：软降权区间（参考）"
+    assert tier_text(0.95, 0.90, 0.75) == "≥0.9：强降权区间（参考）"
+    assert tier_text(0.90, 0.90, 0.75) == "≥0.9：强降权区间（参考）"  # 边界归强档
+    assert tier_text(0.80, 0.90, 0.75) == "0.75~0.9：软降权区间（参考）"
     assert tier_text(0.50, 0.90, 0.75) == "<0.75：正常"
 
 

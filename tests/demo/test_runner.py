@@ -1,6 +1,7 @@
 import asyncio
 import threading
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
@@ -11,7 +12,8 @@ from app.embedder.fake import FakeEmbedder
 from app.index.service import IndexService
 from app.pipeline.processor import Processor
 from app.store.sqlite_store import SqliteStore
-from demo.runner import DemoResult, DemoRunner, DemoValidationError
+from demo.runner import (DemoResult, DemoRunner, DemoValidationError,
+                         fetch_top_image, tier_text)
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
 
@@ -152,3 +154,89 @@ def test_submit_serialized_by_lock(runner, monkeypatch):
         depth += 1 if ev == "enter" else -1
         peak = max(peak, depth)
     assert peak == 1  # 锁内全程无重叠
+
+
+def test_tier_text_boundaries():
+    assert tier_text(0.95, 0.90, 0.75) == "≥0.9：强降权区间（参考）"
+    assert tier_text(0.90, 0.90, 0.75) == "≥0.9：强降权区间（参考）"  # 边界归强档
+    assert tier_text(0.80, 0.90, 0.75) == "0.75~0.9：软降权区间（参考）"
+    assert tier_text(0.50, 0.90, 0.75) == "<0.75：正常"
+
+
+def test_fetch_top_image_from_base64():
+    import base64
+    rec = PostRecord(post_id="p", text="t",
+                     image_base64=base64.b64encode(_png()).decode())
+    img = fetch_top_image(rec, timeout=3.0)
+    assert img is not None and img.size == (16, 16)
+
+
+def test_fetch_top_image_no_image():
+    rec = PostRecord(post_id="p", text="t")
+    assert fetch_top_image(rec, timeout=3.0) is None
+
+
+def test_fetch_top_image_bad_base64():
+    rec = PostRecord(post_id="p", text="t", image_base64="!!!")
+    assert fetch_top_image(rec, timeout=3.0) is None
+
+
+def test_fetch_top_image_url_single_attempt(monkeypatch):
+    """A-4：URL 渲染走轻量下载——单次请求、异常即 None，不重试。"""
+    import demo.runner as mod
+
+    def fake_get(url, timeout, follow_redirects):
+        raise RuntimeError("连不上")
+    monkeypatch.setattr(mod.httpx, "get", fake_get)
+    rec = PostRecord(post_id="p", text="t", image_url="https://example.com/a.jpg")
+    assert fetch_top_image(rec, timeout=3.0) is None
+
+
+def test_fetch_top_image_url_success(monkeypatch):
+    import demo.runner as mod
+    resp = MagicMock(status_code=200, content=_png())
+    monkeypatch.setattr(mod.httpx, "get", lambda url, timeout, follow_redirects: resp)
+    rec = PostRecord(post_id="p", text="t", image_url="https://example.com/a.jpg")
+    img = fetch_top_image(rec, timeout=3.0)
+    assert img is not None and img.size == (16, 16)
+
+
+def test_top3_loaded_with_images(runner):
+    r1 = runner.submit(_png((9, 9, 9)), None, "第一帖")
+    r2 = runner.submit(_png((9, 9, 9)), None, "换个文案重发")
+    assert len(r2.top_posts) == 1
+    top = r2.top_posts[0]
+    assert top.post_id == r1.post_id
+    assert top.text == "第一帖"
+    assert top.image is not None  # base64 库存解码成功
+    assert top.sim_image > 0.99 and top.sim_text >= 0.0  # 卡片携带双模态分数
+
+
+def test_top3_short_note(runner):
+    """不足 3 条时 top_note 给出提示。"""
+    runner.submit(_png((9, 9, 9)), None, "第一帖")
+    r2 = runner.submit(_png((9, 9, 9)), None, "重发")
+    assert len(r2.top_posts) < 3
+    assert r2.top_note  # 非空提示
+
+
+def test_url_submit_download_stage_real(runner):
+    """A-5：URL 提交 PostRecord 带 image_url 入库，processor download 阶段走生产 fetch_image。"""
+    resp = MagicMock(status_code=200, content=_png())
+
+    class _Client:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, timeout=None): return resp
+
+    import app.pipeline.downloader as dl
+    orig_client = dl.httpx.AsyncClient
+    dl.httpx.AsyncClient = _Client
+    try:
+        result = runner.submit(None, "https://example.com/a.jpg", "URL 帖")
+    finally:
+        dl.httpx.AsyncClient = orig_client
+    assert result.status == "indexed"
+    assert "download" in result.outcome.timings_ms
+    assert result.submitted_image is None  # URL 提交不回显原图（库中不落 base64），UI 展示 URL 文本
