@@ -10,7 +10,7 @@ from app.config import Config
 from app.domain import EncodeError, IndexStatus, PostRecord
 from app.embedder.fake import FakeEmbedder
 from app.index.service import IndexService
-from app.pipeline.processor import Processor
+from app.pipeline.processor import ProcessOutcome, Processor
 from app.store.sqlite_store import SqliteStore, decode_vector
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
@@ -177,3 +177,40 @@ async def test_no_image_post_text_only(env):
     # 重建路径：image_vec NULL 不得把无图帖挡在重建集外
     rows = await store.list_indexed_within(NOW - timedelta(days=30))
     assert len(rows) == 2
+
+
+async def test_process_returns_outcome_with_stage_timings(env):
+    _, store, index, proc = env
+    await _submit(store, "p1", _png(), "第一帖", NOW)
+    outcome = await proc.process("p1")
+    assert isinstance(outcome, ProcessOutcome)
+    assert outcome.result is not None and outcome.error_code is None
+    assert set(outcome.timings_ms) == {
+        "download", "image_embed", "text_embed", "persist",
+        "search", "result_persist", "faiss_add"}
+    assert all(v >= 0.0 for v in outcome.timings_ms.values())
+    assert outcome.total_ms > 0
+
+
+async def test_process_failure_returns_outcome_when_raise_disabled(env):
+    _, store, index, proc = env
+    rec = PostRecord(post_id="bad", image_base64=base64.b64encode(b"broken").decode(),
+                     text="坏图", created_at=NOW)
+    await store.upsert_post(rec)
+    outcome = await proc.process("bad", raise_on_error=False)
+    assert outcome.result is None
+    assert outcome.error_code.value == "image_decode_failed"
+    assert "download" in outcome.timings_ms  # 失败前已完成阶段的耗时保留
+    post = await store.get_post("bad")
+    assert post.status == IndexStatus.FAILED
+
+
+async def test_process_default_still_raises(env):
+    """raise_on_error 默认 True：生产 worker 的异常契约逐字节不变。"""
+    _, store, index, proc = env
+    rec = PostRecord(post_id="bad", image_base64=base64.b64encode(b"broken").decode(),
+                     text="坏图", created_at=NOW)
+    await store.upsert_post(rec)
+    from app.domain import ProcessingError
+    with pytest.raises(ProcessingError):
+        await proc.process("bad")
