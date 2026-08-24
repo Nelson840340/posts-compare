@@ -13,6 +13,21 @@ import threading
 # 必须在任何扩展库加载前设置（Linux 无此冲突，setdefault 不覆盖用户显式配置）
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# macOS arm64 上 KMP_DUPLICATE_LIB_OK 不足以避免双 libomp 冲突（模型实例化时
+# 段错误）；先以 RTLD_GLOBAL 预载 torch 的 libomp，后续 faiss 加载同名库时直接复用，
+# 全程仅一份 OpenMP 运行时。仅对 demo 启动流程（faiss 未加载）有效；
+# faiss 已在先的进程（如 pytest 收集顺序）跳过，避免反向引入第二份。
+if sys.platform == "darwin" and "faiss" not in sys.modules:
+    try:
+        import ctypes
+
+        import torch
+
+        ctypes.CDLL(os.path.join(os.path.dirname(torch.__file__), "lib",
+                                 "libomp.dylib"), mode=ctypes.RTLD_GLOBAL)
+    except OSError:
+        pass
+
 # 以脚本方式直跑（python demo/app.py，含 IDE 调试器）时，脚本目录 demo/ 位于
 # sys.path 首位，demo/app.py 会遮蔽 app 包（'app' is not a package）；
 # 剔除脚本目录并补入项目根，保证 `from app...` 解析到 app 包。
