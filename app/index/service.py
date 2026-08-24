@@ -23,6 +23,14 @@ class SearchHit:
     adaptive_expanded: bool
 
 
+@dataclass
+class TopHit:
+    """Top-K 展示候选（spec 2026-08-24 §3.2）：双模态分数合并。"""
+    post_id: str
+    sim_image: float
+    sim_text: float
+
+
 class _SingleIndex:
     def __init__(self, dim: int):
         self.dim = dim
@@ -74,6 +82,23 @@ class _SingleIndex:
             return (float(sim), post_id), polluted
         return None, polluted
 
+    def topk(self, vec: np.ndarray, k: int, exclude_id: str, cutoff: datetime):
+        """返回过滤后的全部候选 [(sim, post_id)]，保持相似度降序。"""
+        n = self.index.ntotal
+        if n == 0:
+            return []
+        k = min(k, n)
+        sims, ids = self.index.search(np.asarray([vec], dtype=np.float32), k)
+        out = []
+        for sim, fid in zip(sims[0], ids[0]):
+            if fid < 0:
+                continue
+            post_id, created_at = self.meta[int(fid)]
+            if post_id == exclude_id or created_at < cutoff:
+                continue
+            out.append((float(sim), post_id))
+        return out
+
 
 class IndexService:
     def __init__(self, image_dim: int = IMAGE_DIM, text_dim: int = TEXT_DIM):
@@ -122,3 +147,21 @@ class IndexService:
             matched = txt_hit[1] if txt_hit and sim_text > 0 else None
         return SearchHit(sim_image=max(sim_image, 0.0), sim_text=max(sim_text, 0.0),
                          matched_post_id=matched, adaptive_expanded=expanded)
+
+    def top_hits(self, image_vec, text_vec, *, exclude_id, cutoff,
+                 k: int = 3, candidate_k: int | None = None) -> list[TopHit]:
+        """Top-K 展示检索（spec 2026-08-24 §3.2 / 附录 A-3）。
+
+        双索引各取 candidate_k（默认 k*2）候选，按 post_id 合并双模态分数，
+        按 max 降序取前 k。不做自适应扩 K：挤占场景不足 k 条按实际返回，
+        仅服务 demo 展示，判重检测仍走 search()。
+        """
+        ck = candidate_k if candidate_k is not None else k * 2
+        merged: dict[str, list[float]] = {}
+        for sim, pid in self._img.topk(image_vec, ck, exclude_id, cutoff):
+            merged.setdefault(pid, [0.0, 0.0])[0] = max(sim, 0.0)
+        for sim, pid in self._txt.topk(text_vec, ck, exclude_id, cutoff):
+            merged.setdefault(pid, [0.0, 0.0])[1] = max(sim, 0.0)
+        hits = [TopHit(pid, si, st) for pid, (si, st) in merged.items()]
+        hits.sort(key=lambda h: max(h.sim_image, h.sim_text), reverse=True)
+        return hits[:k]

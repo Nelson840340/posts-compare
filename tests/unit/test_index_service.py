@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from app.index.service import IndexService
+from app.index.service import IndexService, TopHit
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
 
@@ -109,3 +109,71 @@ def test_negative_sims_yield_no_matched(svc):
                      top_k=16, adaptive_k_steps=(64, 256))
     assert hit.sim_image == 0.0 and hit.sim_text == 0.0
     assert hit.matched_post_id is None
+
+
+def _search_all(svc, iv, tv, **kw):
+    args = dict(exclude_id="x", cutoff=NOW - timedelta(days=30), k=3)
+    args.update(kw)
+    return svc.top_hits(iv, tv, **args)
+
+
+def test_top_hits_empty_index(svc):
+    assert _search_all(svc, _vec(512, 1), _vec(384, 2)) == []
+
+
+def test_top_hits_merges_modality_scores(svc):
+    """同一候选同时出现在双索引：合并后携带两个模态分数，按 max 降序。"""
+    iv, tv = _vec(512, 1), _vec(384, 2)
+    svc.add("a", NOW - timedelta(days=1), iv, _vec(384, 3))          # 图片完全命中
+    svc.add("b", NOW - timedelta(days=1), _vec(512, 4), tv)          # 文字完全命中
+    svc.add("c", NOW - timedelta(days=1), _vec(512, 5), _vec(384, 6))
+    hits = _search_all(svc, iv, tv)
+    ids = [h.post_id for h in hits]
+    assert set(ids[:2]) == {"a", "b"}
+    top = {h.post_id: h for h in hits}
+    assert top["a"].sim_image == pytest.approx(1.0, abs=1e-5)
+    assert top["b"].sim_text == pytest.approx(1.0, abs=1e-5)
+    assert top["c"].sim_image < 1.0 and top["c"].sim_text < 1.0
+
+
+def test_top_hits_self_excluded(svc):
+    iv, tv = _vec(512, 1), _vec(384, 2)
+    svc.add("self", NOW - timedelta(days=1), iv, tv)
+    svc.add("other", NOW - timedelta(days=1), _vec(512, 9), _vec(384, 10))
+    hits = svc.top_hits(iv, tv, exclude_id="self", cutoff=NOW - timedelta(days=30), k=3)
+    assert "self" not in [h.post_id for h in hits]
+    assert len(hits) == 1
+
+
+def test_top_hits_window_filtered(svc):
+    iv, tv = _vec(512, 1), _vec(384, 2)
+    svc.add("expired", NOW - timedelta(days=40), iv, tv)
+    svc.add("fresh", NOW - timedelta(days=1), _vec(512, 9), tv)
+    hits = _search_all(svc, iv, tv)
+    assert [h.post_id for h in hits] == ["fresh"]
+    assert hits[0].sim_text == pytest.approx(1.0, abs=1e-5)
+
+
+def test_top_hits_negative_clamped_to_zero(svc):
+    """负内积归零（与 search 一致），候选保留但分数为 0。"""
+    iv, tv = _vec(512, 1), _vec(384, 2)
+    svc.add("neg", NOW - timedelta(days=1), (-iv).astype(np.float32),
+            (-tv).astype(np.float32))
+    hits = _search_all(svc, iv, tv)
+    assert len(hits) == 1
+    assert hits[0].sim_image == 0.0 and hits[0].sim_text == 0.0
+
+
+def test_top_hits_shorter_than_k(svc):
+    """候选不足 k：按实际条数返回，不补齐不报错（A-3）。"""
+    svc.add("p0", NOW - timedelta(days=1), _vec(512, 1), _vec(384, 1))
+    hits = _search_all(svc, _vec(512, 2), _vec(384, 2))
+    assert len(hits) == 1
+
+
+def test_top_hits_k_limits_count(svc):
+    for i in range(5):
+        svc.add(f"p{i}", NOW - timedelta(days=1), _vec(512, 10 + i), _vec(384, 10 + i))
+    hits = svc.top_hits(_vec(512, 1), _vec(384, 1), exclude_id="x",
+                        cutoff=NOW - timedelta(days=30), k=2)
+    assert len(hits) == 2
