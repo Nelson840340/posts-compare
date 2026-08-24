@@ -40,6 +40,18 @@ poetry run python -m app.main        # 默认 127.0.0.1:8000
 | `SIM_TOP_K` | `16` | 每索引检索候选数（自适应扩 K 至 64/256） |
 | `SIM_HARD_DOWNGRADE_THRESHOLD` / `SIM_SOFT_DOWNGRADE_THRESHOLD` | `0.90` / `0.75` | 分数带阈值，供下游参考 |
 
+## Gradio Demo（网页试用）
+
+```bash
+poetry run python demo/app.py        # 127.0.0.1:7860
+```
+
+上传图片或填写图片 URL（二选一）+ 文字提交新帖，页面展示：综合与分模态相似度分数（附阈值标档参考）、流水线各阶段耗时（按真实执行顺序）、Top-3 相似帖内容。设计文档见 [gradio-demo spec](docs/superpowers/specs/2026-08-24-gradio-demo-design.md)。
+
+- **不得与 FastAPI 生产服务同时运行**（两进程内存索引互不可见、SQLite 写锁竞争），运行前先停服务；
+- demo 提交的帖子以 `demo-` 前缀 ID 落生产库并注册索引，**不提供清理工具**，30 天窗口自然过期；窗口期内切回生产服务，真实帖可能与 demo 帖碰撞被判重（已接受风险，见 spec 附录 A-7）；
+- 页面立即开门，模型加载与索引重建后台进行，就绪前提交返回"服务准备中"。
+
 ## 联调示例
 
 ```bash
