@@ -63,6 +63,17 @@ def test_setup_rebuilds_index_from_db(tmp_db):
     asyncio.run(store.close())
 
 
+def test_setup_creates_db_parent_dir(tmp_path):
+    """fresh clone 首次运行：db 父目录不存在时 setup 自动创建（与生产 lifespan 一致）。"""
+    db = str(tmp_path / "data" / "similarity.db")
+    cfg = Config(db_path=db)
+    store = SqliteStore(db)
+    r = DemoRunner(cfg, FakeEmbedder(), store, IndexService())
+    asyncio.run(r.setup())
+    assert r.ready is True
+    asyncio.run(store.close())
+
+
 def test_both_image_and_url_rejected(runner):
     with pytest.raises(DemoValidationError, match="二选一"):
         runner.submit(_png(), "https://example.com/a.jpg", "t")

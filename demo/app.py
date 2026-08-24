@@ -5,7 +5,12 @@
 页面立即开门，模型加载与索引重建后台进行（A-8）；未就绪提交返回"服务准备中"。
 """
 import logging
+import os
 import threading
+
+# macOS 上 faiss 与 torch 各自携带 libomp，双份加载会在首次检索时 SIGABRT；
+# 必须在任何扩展库加载前设置（Linux 无此冲突，setdefault 不覆盖用户显式配置）
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import gradio as gr
 

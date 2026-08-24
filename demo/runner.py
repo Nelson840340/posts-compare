@@ -9,6 +9,7 @@ import asyncio
 import base64
 import io
 import logging
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -96,6 +97,7 @@ class DemoRunner:
 
     async def setup(self) -> None:
         """加载模型 + 打开库 + 从库重建索引（与生产 lifespan 同逻辑）。"""
+        os.makedirs(os.path.dirname(self.cfg.db_path) or ".", exist_ok=True)
         await asyncio.to_thread(self.embedder.load)
         await self.store.init()
         cutoff = window_cutoff(utcnow(), self.cfg.window_days)
