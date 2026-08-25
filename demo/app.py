@@ -9,24 +9,12 @@ import os
 import sys
 import threading
 
-# macOS 上 faiss 与 torch 各自携带 libomp，双份加载会在首次检索时 SIGABRT；
-# 必须在任何扩展库加载前设置（Linux 无此冲突，setdefault 不覆盖用户显式配置）
+# macOS arm64 上 faiss 与 torch 各自捆绑一份 install name 不同的 libomp.dylib，
+# 同进程加载两份 OpenMP 运行时会在 faiss 检索时段错误（exit 139）；
+# KMP_DUPLICATE_LIB_OK 与 ctypes 预载均无法去重（install name 不同）。
+# 有效修复：bash scripts/fix_faiss_libomp.sh 将 faiss 的 libomp 依赖改指向 torch 副本
+# （venv 重装 faiss-cpu 后需重跑）。Linux 无此冲突。
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
-# macOS arm64 上 KMP_DUPLICATE_LIB_OK 不足以避免双 libomp 冲突（模型实例化时
-# 段错误）；先以 RTLD_GLOBAL 预载 torch 的 libomp，后续 faiss 加载同名库时直接复用，
-# 全程仅一份 OpenMP 运行时。仅对 demo 启动流程（faiss 未加载）有效；
-# faiss 已在先的进程（如 pytest 收集顺序）跳过，避免反向引入第二份。
-if sys.platform == "darwin" and "faiss" not in sys.modules:
-    try:
-        import ctypes
-
-        import torch
-
-        ctypes.CDLL(os.path.join(os.path.dirname(torch.__file__), "lib",
-                                 "libomp.dylib"), mode=ctypes.RTLD_GLOBAL)
-    except OSError:
-        pass
 
 # 以脚本方式直跑（python demo/app.py，含 IDE 调试器）时，脚本目录 demo/ 位于
 # sys.path 首位，demo/app.py 会遮蔽 app 包（'app' is not a package）；
